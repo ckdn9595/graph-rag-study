@@ -1,0 +1,168 @@
+# ============================================
+# Cost Analytics 스키마 메타데이터
+# ============================================
+# 이 파일을 실제 DB 스키마에 맞게 수정하세요.
+#
+# 사용법:
+# 1. tables 섹션에 테이블 정보 추가
+# 2. relationships 섹션에 FK 관계 정의
+# 3. business_glossary에 비즈니스 용어 매핑 추가
+# ============================================
+
+tables:
+  # ----------------------------------------
+  # 예시 테이블 1: 월별 청구 데이터
+  # ----------------------------------------
+  billing_monthly:
+    description: "월별 청구 요약 테이블 - AWS 서비스별 사용량과 비용"
+    source: "RDS"
+    columns:
+      - name: id
+        type: bigint
+        description: "PK (auto increment)"
+      - name: customer_id
+        type: varchar(50)
+        description: "고객 식별자"
+      - name: billing_month
+        type: date
+        description: "청구 월 (YYYY-MM-01 형식)"
+      - name: service_type
+        type: varchar(50)
+        description: "AWS 서비스 유형 (EC2, RDS, S3, Lambda 등)"
+      - name: region
+        type: varchar(30)
+        description: "AWS 리전 (ap-northeast-2 등)"
+      - name: usage_amount
+        type: decimal(18,6)
+        description: "사용량 (단위는 서비스별로 다름)"
+      - name: usage_unit
+        type: varchar(30)
+        description: "사용량 단위 (Hours, GB, Requests 등)"
+      - name: cost_usd
+        type: decimal(18,6)
+        description: "비용 (USD, 할인 전 원가)"
+      - name: created_at
+        type: datetime
+        description: "레코드 생성 시간"
+      - name: updated_at
+        type: datetime
+        description: "레코드 수정 시간"
+
+  # ----------------------------------------
+  # 예시 테이블 2: 고객 계약 정보
+  # ----------------------------------------
+  customer_contracts:
+    description: "고객 계약 정보 - 할인율, 계약 기간 등"
+    source: "RDS"
+    columns:
+      - name: customer_id
+        type: varchar(50)
+        description: "고객 식별자 (PK)"
+      - name: customer_name
+        type: varchar(200)
+        description: "고객 회사명"
+      - name: contract_type
+        type: varchar(50)
+        description: "계약 유형 (Standard, Enterprise, Premium 등)"
+      - name: discount_rate
+        type: decimal(5,4)
+        description: "계약 할인율 (0.0000 ~ 1.0000)"
+      - name: contract_start_date
+        type: date
+        description: "계약 시작일"
+      - name: contract_end_date
+        type: date
+        description: "계약 종료일"
+      - name: sales_rep
+        type: varchar(100)
+        description: "담당 영업 담당자"
+      - name: status
+        type: varchar(20)
+        description: "계약 상태 (active, expired, pending)"
+
+  # ----------------------------------------
+  # 예시 테이블 3: 크레딧 적용 내역
+  # ----------------------------------------
+  credits:
+    description: "크레딧 적용 내역 - 프로모션, 보상 등"
+    source: "RDS"
+    columns:
+      - name: id
+        type: bigint
+        description: "PK (auto increment)"
+      - name: customer_id
+        type: varchar(50)
+        description: "고객 식별자"
+      - name: credit_amount
+        type: decimal(18,6)
+        description: "크레딧 금액 (USD)"
+      - name: credit_type
+        type: varchar(50)
+        description: "크레딧 유형 (promotion, refund, support 등)"
+      - name: description
+        type: text
+        description: "크레딧 설명"
+      - name: applied_date
+        type: date
+        description: "크레딧 적용일"
+      - name: expiry_date
+        type: date
+        description: "크레딧 만료일"
+      - name: created_at
+        type: datetime
+        description: "레코드 생성 시간"
+
+# ----------------------------------------
+# 테이블 간 관계 정의
+# ----------------------------------------
+# from: 참조하는 테이블.컬럼
+# to: 참조되는 테이블.컬럼
+# type: many-to-one, one-to-many, many-to-many
+# ----------------------------------------
+relationships:
+  - from: billing_monthly.customer_id
+    to: customer_contracts.customer_id
+    type: many-to-one
+    description: "청구 데이터 → 고객 계약 (N:1)"
+
+  - from: credits.customer_id
+    to: customer_contracts.customer_id
+    type: many-to-one
+    description: "크레딧 → 고객 계약 (N:1)"
+
+# ----------------------------------------
+# 비즈니스 용어 → 기술 용어 매핑
+# ----------------------------------------
+# 자연어 질문에서 사용되는 비즈니스 용어를
+# 실제 테이블/컬럼과 매핑합니다.
+# ----------------------------------------
+business_glossary:
+  # 비용 관련
+  "비용": "billing_monthly.cost_usd"
+  "요금": "billing_monthly.cost_usd"
+  "청구금액": "billing_monthly.cost_usd"
+  "사용량": "billing_monthly.usage_amount"
+
+  # 할인 관련
+  "할인율": "customer_contracts.discount_rate"
+  "할인": "customer_contracts.discount_rate"
+
+  # 크레딧 관련
+  "크레딧": "credits.credit_amount"
+  "프로모션": "credits (credit_type = 'promotion')"
+  "환불": "credits (credit_type = 'refund')"
+
+  # 고객 관련
+  "고객": "customer_contracts.customer_name"
+  "고객사": "customer_contracts.customer_name"
+  "계약": "customer_contracts 테이블"
+
+  # 서비스 관련
+  "EC2": "billing_monthly (service_type = 'EC2')"
+  "RDS": "billing_monthly (service_type = 'RDS')"
+  "S3": "billing_monthly (service_type = 'S3')"
+  "Lambda": "billing_monthly (service_type = 'Lambda')"
+
+  # 기간 관련
+  "지난달": "billing_month = DATE_FORMAT(DATE_SUB(NOW(), INTERVAL 1 MONTH), '%Y-%m-01')"
+  "이번달": "billing_month = DATE_FORMAT(NOW(), '%Y-%m-01')"
