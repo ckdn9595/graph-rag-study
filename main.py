@@ -37,7 +37,7 @@ def load_config():
         "db_config": db_config,
         "default_method": os.getenv("DEFAULT_METHOD", "yaml"),
         "max_validation_retries": int(os.getenv("MAX_VALIDATION_RETRIES", "3")),
-        "max_turns": int(os.getenv("MAX_TURNS", "10")),
+        "max_turns": int(os.getenv("MAX_TURNS", "100")),
     }
 
 

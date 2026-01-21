@@ -3,3 +3,5 @@ data/
 *.md
 .python-version
 .env
+data/schema_metadata.yaml
+data/schema_metadata_sample.yaml

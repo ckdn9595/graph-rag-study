@@ -379,3 +379,118 @@ class SchemaGraph:
             "path": path_info["path"],
             "joins": path_info["joins"],
         }
+
+    def visualize(self, output_path: str = "./output/schema_graph.html", open_browser: bool = True) -> str:
+        """
+        Pyvis를 사용하여 그래프를 HTML로 시각화
+
+        Args:
+            output_path: 출력할 HTML 파일 경로
+            open_browser: 생성 후 브라우저에서 자동으로 열지 여부
+
+        Returns:
+            생성된 HTML 파일 경로
+        """
+        from pyvis.network import Network
+        import webbrowser
+        from pathlib import Path
+
+        # 출력 디렉토리 생성
+        output_file = Path(output_path)
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+
+        # Pyvis 네트워크 생성
+        net = Network(
+            height="750px",
+            width="100%",
+            bgcolor="#ffffff",
+            font_color="#333333",
+            directed=True,
+            notebook=False,
+        )
+
+        # 물리 엔진 설정 (노드 배치)
+        net.set_options("""
+        {
+            "nodes": {
+                "shape": "box",
+                "font": {"size": 14, "face": "arial"},
+                "borderWidth": 2,
+                "shadow": true
+            },
+            "edges": {
+                "arrows": {"to": {"enabled": true, "scaleFactor": 0.5}},
+                "color": {"color": "#848484", "highlight": "#1E90FF"},
+                "font": {"size": 10, "align": "middle"},
+                "smooth": {"type": "curvedCW", "roundness": 0.2}
+            },
+            "physics": {
+                "enabled": true,
+                "barnesHut": {
+                    "gravitationalConstant": -3000,
+                    "centralGravity": 0.3,
+                    "springLength": 200,
+                    "springConstant": 0.04
+                }
+            },
+            "interaction": {
+                "hover": true,
+                "tooltipDelay": 100
+            }
+        }
+        """)
+
+        # 노드 추가 (테이블)
+        for node in self.graph.nodes:
+            node_data = self.graph.nodes[node]
+            columns = node_data.get("columns", [])
+
+            # 툴팁에 컬럼 정보 표시
+            column_info = "\n".join([
+                f"• {col['name']} ({col['type']})"
+                for col in columns[:10]  # 최대 10개만
+            ])
+            if len(columns) > 10:
+                column_info += f"\n... 외 {len(columns) - 10}개"
+
+            tooltip = f"<b>{node}</b>\n{node_data.get('description', '')}\n\n<b>컬럼:</b>\n{column_info}"
+
+            net.add_node(
+                node,
+                label=node,
+                title=tooltip,
+                color="#4A90D9",
+                size=30,
+            )
+
+        # 엣지 추가 (관계) - 중복 방지를 위해 한 방향만
+        added_edges = set()
+        for edge in self.graph.edges:
+            from_table, to_table = edge
+            edge_key = tuple(sorted([from_table, to_table]))
+
+            if edge_key not in added_edges:
+                edge_data = self.graph.edges[edge]
+                join_condition = edge_data.get("join_condition", "")
+                rel_type = edge_data.get("type", "")
+
+                # 엣지 라벨 (컬럼명만 표시)
+                label = join_condition.split("=")[0].split(".")[-1].strip() if join_condition else ""
+
+                net.add_edge(
+                    from_table,
+                    to_table,
+                    title=f"{join_condition}\n({rel_type})",
+                    label=label,
+                    color="#848484",
+                )
+                added_edges.add(edge_key)
+
+        # HTML 파일 생성
+        net.write_html(str(output_file))
+
+        # 브라우저에서 열기
+        if open_browser:
+            webbrowser.open(f"file://{output_file.absolute()}")
+
+        return str(output_file.absolute())
