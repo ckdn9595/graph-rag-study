@@ -1,7 +1,6 @@
 """Claude Agent SDK 기반 Cost Analytics Agent"""
 
 import anyio
-from typing import Optional
 
 from claude_agent_sdk import (
     ClaudeSDKClient,
@@ -12,10 +11,10 @@ from claude_agent_sdk import (
     ToolUseBlock,
 )
 
-from .tools import create_cost_analytics_mcp_server, MCP_TOOL_NAMES
+from .tools import create_text_to_sql_mcp_server, MCP_TOOL_NAMES
 
 
-class CostAnalyticsAgent:
+class TextToSqlAgent:
     """Cost Analytics SQL Agent - Claude Agent SDK 사용"""
 
     def __init__(
@@ -35,14 +34,14 @@ class CostAnalyticsAgent:
         self.max_validation_retries = max_validation_retries
 
         # MCP 서버 생성
-        self.mcp_server = create_cost_analytics_mcp_server()
+        self.mcp_server = create_text_to_sql_mcp_server()
 
         # 시스템 프롬프트
         self.system_prompt = self._build_system_prompt()
 
     def _build_system_prompt(self) -> str:
         """시스템 프롬프트 생성"""
-        return f"""당신은 Cost Analytics SQL Agent입니다.
+        return f"""당신은 Text to SQL Agent입니다.
 
 ## 역할
 - 사용자의 자연어 질문을 분석하여 적절한 SQL 쿼리를 생성합니다.
@@ -69,9 +68,10 @@ class CostAnalyticsAgent:
 - graph: NetworkX 그래프에서 테이블 관계 탐색 (조인 경로 추론 가능)
 
 ## 응답 형식
-- 쿼리 결과가 있으면 주요 내용을 요약해서 설명하세요.
-- 데이터가 많으면 상위 몇 개만 보여주고 전체 개수를 알려주세요.
-- CSV로 저장했다면 파일 경로를 알려주세요.
+- 실행한 SQL 쿼리를 명시하세요.
+- 쿼리 결과의 주요 내용을 요약해서 설명하세요.
+- 데이터가 많으면 상위 몇 개만 보여주고 전체 건수를 알려주세요.
+- CSV로 저장한 경우 파일 경로를 알려주세요.
 """
 
     def _create_options(self) -> ClaudeAgentOptions:
@@ -79,7 +79,7 @@ class CostAnalyticsAgent:
         return ClaudeAgentOptions(
             system_prompt=self.system_prompt,
             max_turns=self.max_turns,
-            mcp_servers={"cost_analytics": self.mcp_server},
+            mcp_servers={"text_to_sql": self.mcp_server},
             allowed_tools=MCP_TOOL_NAMES,
             permission_mode="acceptEdits",  # 도구 자동 실행
         )
@@ -93,15 +93,27 @@ class CostAnalyticsAgent:
 
         Returns:
             {
-                "answer": str,  # 최종 응답
-                "tool_calls": list,  # 호출된 Tool 목록
+                "queries": [  # 실행된 쿼리 목록 (validation 실패는 제외)
+                    {
+                        "sql": str,
+                        "success": bool,
+                        "row_count": int,
+                        "data": list[dict]
+                    }
+                ],
+                "summary": str,  # Claude가 생성한 요약
+                "csv_path": str | None,  # CSV 저장 시 경로
                 "cost_usd": float | None,  # 비용 (USD)
             }
         """
         options = self._create_options()
-        tool_calls = []
-        answer_parts = []
+        queries = []
+        summary_parts = []
+        csv_path = None
         cost_usd = None
+
+        # Tool 호출 추적용
+        pending_sql = {}  # tool_use_id -> sql
 
         async with ClaudeSDKClient(options=options) as client:
             await client.connect()
@@ -111,19 +123,38 @@ class CostAnalyticsAgent:
                 if isinstance(message, AssistantMessage):
                     for block in message.content:
                         if isinstance(block, TextBlock):
-                            answer_parts.append(block.text)
+                            summary_parts.append(block.text)
                         elif isinstance(block, ToolUseBlock):
-                            tool_calls.append({
-                                "tool": block.name,
-                                "input": block.input,
-                            })
+                            # execute_sql 호출 시 sql 저장
+                            if block.name.endswith("__execute_sql"):
+                                pending_sql[block.id] = block.input.get("sql", "")
 
                 elif isinstance(message, ResultMessage):
                     cost_usd = message.total_cost_usd
 
+        # Tool 결과에서 실행된 쿼리 정보 추출
+        # (ClaudeSDKClient는 tool result를 별도로 제공하지 않으므로
+        #  ToolHandler에서 마지막 실행 결과를 가져옴)
+        from .tools import get_handler
+        try:
+            handler = get_handler()
+            if handler._last_result:
+                # 마지막 실행된 쿼리 결과 추가
+                queries.append({
+                    "sql": handler._last_executed_sql if hasattr(handler, '_last_executed_sql') else "",
+                    "success": True,
+                    "row_count": len(handler._last_result),
+                    "data": handler._last_result,
+                })
+            if hasattr(handler, '_last_csv_path') and handler._last_csv_path:
+                csv_path = handler._last_csv_path
+        except RuntimeError:
+            pass  # Handler not initialized
+
         return {
-            "answer": "\n".join(answer_parts).strip(),
-            "tool_calls": tool_calls,
+            "queries": queries,
+            "summary": "\n".join(summary_parts).strip(),
+            "csv_path": csv_path,
             "cost_usd": cost_usd,
         }
 
@@ -136,8 +167,9 @@ class CostAnalyticsAgent:
 
         Returns:
             {
-                "answer": str,
-                "tool_calls": list,
+                "queries": list,  # 실행된 쿼리 목록
+                "summary": str,   # Claude 요약
+                "csv_path": str | None,
                 "cost_usd": float | None,
             }
         """
@@ -145,7 +177,7 @@ class CostAnalyticsAgent:
 
     async def _run_interactive_async(self):
         """비동기 대화형 모드 실행"""
-        print(f"Cost Analytics Agent 시작 (모드: {self.context_method})")
+        print(f"Text to Sql Agent 시작 (모드: {self.context_method})")
         print("질문을 입력하세요. 종료하려면 'exit' 또는 'quit'를 입력하세요.\n")
 
         options = self._create_options()

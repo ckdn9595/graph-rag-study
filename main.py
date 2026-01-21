@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 # 프로젝트 루트를 path에 추가
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.agent.agent import CostAnalyticsAgent
+from src.agent.agent import TextToSqlAgent
 from src.agent.tools import init_handler, close_handler
 
 
@@ -46,15 +46,15 @@ def main():
         description="Cost Analytics Agent - 자연어 질문을 SQL로 변환하여 실행",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-예시:
-  # YAML 모드로 질문 실행
-  python main.py --method yaml --question "지난달 A고객 EC2 비용은?"
-
-  # Graph 모드로 대화형 실행
-  python main.py --method graph --interactive
-
-  # 기본 모드로 질문 실행
-  python main.py -q "2024년 12월 전체 비용 요약"
+        예시:
+          # YAML 모드로 질문 실행
+          python main.py --method yaml --question "지난달 A고객 EC2 비용은?"
+        
+          # Graph 모드로 대화형 실행
+          python main.py --method graph --interactive
+        
+          # 기본 모드로 질문 실행
+          python main.py -q "2024년 12월 전체 비용 요약"
         """,
     )
 
@@ -136,7 +136,7 @@ def main():
         )
 
         # Agent 생성
-        agent = CostAnalyticsAgent(
+        agent = TextToSqlAgent(
             context_method=method,
             max_turns=config["max_turns"],
             max_validation_retries=config["max_validation_retries"],
@@ -152,12 +152,22 @@ def main():
 
             result = agent.run(args.question)
 
-            print(f"답변:\n{result['answer']}\n")
+            # 실행된 쿼리 출력
+            if result['queries']:
+                for i, q in enumerate(result['queries'], 1):
+                    print(f"[쿼리 {i}]")
+                    print(f"SQL: {q['sql']}")
+                    print(f"결과: {q['row_count']}건\n")
+
+            # 요약 출력
+            print(f"답변:\n{result['summary']}\n")
+
+            # CSV 저장 경로
+            if result['csv_path']:
+                print(f"CSV 저장: {result['csv_path']}\n")
 
             if args.verbose:
-                print(f"\n[디버그] Tool 호출 {len(result['tool_calls'])}회:")
-                for i, call in enumerate(result["tool_calls"], 1):
-                    print(f"  {i}. {call['tool']}")
+                print(f"[디버그] 비용: ${result['cost_usd'] or 0:.4f}")
 
         else:
             parser.print_help()

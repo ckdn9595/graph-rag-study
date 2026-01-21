@@ -1,3 +1,5 @@
 .idea/
+data/
 *.md
 .python-version
+.env
