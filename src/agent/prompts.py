@@ -114,29 +114,59 @@ SECTION_ROLE = """당신은 Text to SQL Agent입니다.
 - 사용자의 자연어 질문을 분석하여 적절한 SQL 쿼리를 생성합니다.
 - RDB에서 쿼리를 실행하고 결과를 반환합니다."""
 
-
+#1. **테이블 파악**: 먼저 `list_tables`로 사용 가능한 테이블을 확인합니다.
 SECTION_WORKFLOW = """## 작업 흐름
-1. **테이블 파악**: 먼저 `list_tables`로 사용 가능한 테이블을 확인합니다.
-2. **스키마 조회**: `get_schema_info`로 관련 테이블의 컬럼 정보를 확인합니다.
-3. **관계 확인**: 여러 테이블 조인이 필요하면 `get_join_hint`로 조인 조건을 확인합니다.
-4. **SQL 생성**: 정보를 바탕으로 SQL 쿼리를 작성합니다.
-5. **검증**: `validate_sql`로 쿼리를 검증합니다. 실패 시 수정하여 재시도합니다.
-6. **실행**: 검증 통과 후 `execute_sql`로 실행합니다.
-7. **저장**: 필요시 `export_csv`로 결과를 CSV로 저장합니다."""
+1. **스키마 조회**: `get_schema_info`로 관련 테이블의 컬럼 정보를 확인합니다.
+2. **관계 확인**: 여러 테이블 조인이 필요하면 `get_join_hint`로 조인 조건을 확인합니다.
+3. **SQL 생성**: 정보를 바탕으로 SQL 쿼리를 작성합니다.
+4. **검증**: `validate_sql`로 쿼리를 검증합니다. 실패 시 수정하여 재시도합니다.
+5. **실행**: 검증 통과 후 `execute_sql`로 실행합니다.
+6. **저장**: 필요시 `export_csv`로 결과를 CSV로 저장합니다."""
+
+
+SECTION_GRAPH_MODE_WORKFLOW = """## Graph 모드 특화 워크플로우
+
+Graph 모드에서는 NetworkX 그래프 기반으로 테이블 관계를 탐색합니다.
+
+### 예시
+질문: "베스핀글로벌의 2026년 1월 샤드 테이블 위치는?"
+
+**잘못된 방법** ❌:
+- get_join_hint를 여러 번 호출
+- 각 테이블을 따로 조회 후 수동으로 연결
+
+**올바른 방법** ✅:
+```
+1. get_optimal_join_path(tables=["tbil_cmpn_l", "tbil_aws_ak_l", "t_aws_mart_shard_l"])
+2. 반환된 경로: tbil_cmpn_l → tbil_aws_ak_l → t_aws_mart_shard_l
+* 참고 : 베스핀글로벌 회사의 경우 tbil_aws_ak_l 조회시 payer가 없다고 나옴, 공용Payer를 사용하기 때문으로 추측, 
+
+3. 조인 조건을 활용해 한 번의 쿼리로 조회
+```
+
+**주의**: 샤드 테이블(t_aws_use_cost_pv 등)의 실제 데이터는 prefix가 붙은 테이블(c0_, f0_)에 있습니다.
+먼저 t_aws_mart_shard_l에서 table_loc를 조회한 후, 해당 테이블에서 데이터를 조회해야 합니다."""
 
 
 SECTION_RULES = """## 규칙
 - SELECT 쿼리만 생성하세요. INSERT, UPDATE, DELETE는 금지입니다.
 - 반드시 validate_sql로 검증 후 execute_sql을 실행하세요.
 - 검증 실패 시 에러 메시지와 suggestion을 참고하여 수정하세요.
-- 사용자가 요청하면 결과를 CSV로 저장하세요."""
+- 사용자가 요청하면 결과를 CSV로 저장하세요.
+- site_id 컬럼이 있는 경우 'BESPIN'으로 고정해서 반드시 조건문에 포함.
+- 조건절에 like 연산자 사용 지양.
+
+## 중요: 최소 쿼리 원칙
+- **사용자가 질문한 내용만 정확히 답하세요.**
+- 추가 정보, 관련 데이터, 도움될 것 같은 정보를 자의적으로 조회하지 마세요.
+- "이것도 궁금하실 것 같아서", "참고로" 등의 추가 조회는 금지입니다.
+- 하나의 질문에는 최소한의 쿼리만 실행하세요."""
 
 
 SECTION_RESPONSE_FORMAT = """## 응답 형식
 - 실행한 SQL 쿼리를 명시하세요.
 - 쿼리 결과의 주요 내용을 요약해서 설명하세요.
-- 데이터가 많으면 상위 몇 개만 보여주고 전체 건수를 알려주세요.
-- CSV로 저장한 경우 파일 경로를 알려주세요."""
+- 데이터가 많으면 상위 몇 개만 보여주고 전체 건수를 알려주세요."""
 
 
 # ============================================
@@ -208,8 +238,9 @@ SELECT ak.PAYR_ACC_ID
 FROM bill_new.tbil_cmpn_l c
 JOIN bill_new.tbil_aws_ak_l ak ON c.CMPN_ID = ak.CMPN_ID
 WHERE c.CMPN_NM LIKE '%{회사명}%'
-  AND ak.PAYR_YN = 'Y'
+#원래는 조건이 추가적으로  AND ak.PAYR_YN = 'Y'이 들어가야 하지만, 없는 경우가 있음. CMPN_ID가 BESPIN인 회사가 공용 Payer를 가지고 있어서 그럼. 
 ```
+
 
 ### 샤드 prefix 종류
 - `c0_`: 현재(current) 데이터
@@ -243,13 +274,22 @@ def create_default_prompt_builder(
     # 기본 섹션 추가
     builder.add_section("role", SECTION_ROLE, order=0)
     builder.add_section("workflow", SECTION_WORKFLOW, order=10)
+
+    # Graph 모드 전용 워크플로우 (조인 경로 최적화)
+    builder.add_section(
+        "graph_workflow",
+        SECTION_GRAPH_MODE_WORKFLOW,
+        enabled=(context_method == "graph"),
+        order=15
+    )
+
     builder.add_section("rules", SECTION_RULES, order=20)
 
     # 컨텍스트 모드 섹션
     context_section = f"""## 컨텍스트 조회 방식
 현재 모드: **{context_method}**
 - yaml: YAML 메타데이터 문서에서 스키마 정보 조회
-- graph: NetworkX 그래프에서 테이블 관계 탐색 (조인 경로 추론 가능)"""
+- graph: NetworkX 그래프에서 테이블 관계 탐색 (조인 경로 추론 가능, `get_optimal_join_path` 사용)"""
     builder.add_section("context_mode", context_section, order=30)
 
     # 마트 테이블 선택 규칙 (선택적)

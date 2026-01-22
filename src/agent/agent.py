@@ -71,12 +71,13 @@ class TextToSqlAgent:
 
         Returns:
             {
-                "queries": [  # 실행된 쿼리 목록 (validation 실패는 제외)
+                "queries": [  # 실행된 모든 쿼리 목록
                     {
                         "sql": str,
                         "success": bool,
                         "row_count": int,
-                        "data": list[dict]
+                        "data": list[dict],
+                        "error": str | None
                     }
                 ],
                 "summary": str,  # Claude가 생성한 요약
@@ -85,13 +86,16 @@ class TextToSqlAgent:
             }
         """
         options = self._create_options()
-        queries = []
         summary_parts = []
         csv_path = None
         cost_usd = None
 
-        # Tool 호출 추적용
-        pending_sql = {}  # tool_use_id -> sql
+        # 새 질문 시작 전 쿼리 히스토리 초기화
+        try:
+            handler = get_handler()
+            handler.reset_query_history()
+        except RuntimeError:
+            pass
 
         async with ClaudeSDKClient(options=options) as client:
             await client.connect()
@@ -102,27 +106,17 @@ class TextToSqlAgent:
                     for block in message.content:
                         if isinstance(block, TextBlock):
                             summary_parts.append(block.text)
-                        elif isinstance(block, ToolUseBlock):
-                            # execute_sql 호출 시 sql 저장
-                            if block.name.endswith("__execute_sql"):
-                                pending_sql[block.id] = block.input.get("sql", "")
 
                 elif isinstance(message, ResultMessage):
                     cost_usd = message.total_cost_usd
 
-        # Tool 결과에서 실행된 쿼리 정보 추출
-        # (ClaudeSDKClient는 tool result를 별도로 제공하지 않으므로
-        #  ToolHandler에서 마지막 실행 결과를 가져옴)
+        # 모든 실행된 쿼리 정보 가져오기
+        queries = []
         try:
             handler = get_handler()
-            if handler._last_result:
-                # 마지막 실행된 쿼리 결과 추가
-                queries.append({
-                    "sql": handler._last_executed_sql if hasattr(handler, '_last_executed_sql') else "",
-                    "success": True,
-                    "row_count": len(handler._last_result),
-                    "data": handler._last_result,
-                })
+            # 모든 실행 쿼리 히스토리 사용
+            queries = handler._all_executed_queries.copy()
+
             if hasattr(handler, '_last_csv_path') and handler._last_csv_path:
                 csv_path = handler._last_csv_path
         except RuntimeError:
@@ -151,6 +145,133 @@ class TextToSqlAgent:
             }
         """
         return anyio.run(self._run_async, question)
+
+    async def _run_streaming_async(self, question: str):
+        """
+        스트리밍 Agent 실행 (진행 상황을 yield)
+
+        Args:
+            question: 사용자 질문
+
+        Yields:
+            dict: 이벤트 정보
+                - {"type": "status", "message": str}  # 상태 메시지
+                - {"type": "tool_call", "name": str, "input": dict}  # Tool 호출
+                - {"type": "tool_result", "name": str, "result": str}  # Tool 결과
+                - {"type": "text", "content": str}  # 텍스트 응답
+                - {"type": "done", "result": dict}  # 완료
+        """
+        options = self._create_options()
+        summary_parts = []
+        csv_path = None
+        cost_usd = None
+
+        # 새 질문 시작 전 쿼리 히스토리 초기화
+        try:
+            handler = get_handler()
+            handler.reset_query_history()
+        except RuntimeError:
+            pass
+
+        yield {"type": "status", "message": "🔌 Agent 연결 중..."}
+
+        async with ClaudeSDKClient(options=options) as client:
+            await client.connect()
+
+            yield {"type": "status", "message": "📤 질문 전송 중..."}
+            await client.query(question)
+
+            yield {"type": "status", "message": "🤔 분석 중..."}
+
+            async for message in client.receive_response():
+                if isinstance(message, AssistantMessage):
+                    for block in message.content:
+                        if isinstance(block, TextBlock):
+                            summary_parts.append(block.text)
+                            yield {"type": "text", "content": block.text}
+
+                        elif isinstance(block, ToolUseBlock):
+                            tool_name = block.name.split("__")[-1]  # mcp__text_to_sql__xxx -> xxx
+                            yield {
+                                "type": "tool_call",
+                                "name": tool_name,
+                                "input": block.input
+                            }
+
+                elif isinstance(message, ResultMessage):
+                    cost_usd = message.total_cost_usd
+
+        # 모든 실행된 쿼리 정보 가져오기
+        queries = []
+        try:
+            handler = get_handler()
+            queries = handler._all_executed_queries.copy()
+
+            if hasattr(handler, '_last_csv_path') and handler._last_csv_path:
+                csv_path = handler._last_csv_path
+        except RuntimeError:
+            pass
+
+        yield {
+            "type": "done",
+            "result": {
+                "queries": queries,
+                "summary": "\n".join(summary_parts).strip(),
+                "csv_path": csv_path,
+                "cost_usd": cost_usd,
+            }
+        }
+
+    def run_streaming(self, question: str):
+        """
+        동기 스트리밍 실행 (generator) - 실시간 이벤트 전달
+
+        사용법:
+            for event in agent.run_streaming(question):
+                if event["type"] == "tool_call":
+                    print(f"Tool: {event['name']}")
+                elif event["type"] == "text":
+                    print(event["content"])
+        """
+        import threading
+        import queue
+
+        event_queue = queue.Queue()
+        error_holder = [None]  # 에러 저장용
+
+        def run_async_in_thread():
+            """별도 스레드에서 비동기 코드 실행"""
+            try:
+                async def collect_and_queue():
+                    async for event in self._run_streaming_async(question):
+                        event_queue.put(event)
+                    event_queue.put(None)  # 종료 신호
+
+                anyio.run(collect_and_queue)
+            except Exception as e:
+                error_holder[0] = e
+                event_queue.put(None)
+
+        # 별도 스레드에서 비동기 실행
+        thread = threading.Thread(target=run_async_in_thread, daemon=True)
+        thread.start()
+
+        # 이벤트를 실시간으로 yield
+        while True:
+            try:
+                event = event_queue.get(timeout=120)  # 2분 타임아웃
+                if event is None:
+                    break
+                yield event
+            except queue.Empty:
+                yield {"type": "status", "message": "⏳ 대기 중... (타임아웃)"}
+                break
+
+        # 에러가 있었다면 raise
+        if error_holder[0]:
+            raise error_holder[0]
+
+        thread.join(timeout=5)
 
     def _handle_slash_command(self, command: str) -> bool:
         """

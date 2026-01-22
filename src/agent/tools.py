@@ -49,6 +49,16 @@ class ToolHandler:
         self._last_executed_sql: str = ""
         self._last_csv_path: Optional[str] = None
 
+        # 디버그용: 모든 실행 쿼리 추적
+        self._all_executed_queries: list = []  # [{"sql": str, "success": bool, "row_count": int, "data": list}]
+
+    def reset_query_history(self):
+        """쿼리 히스토리 초기화 (새 질문 시작 시 호출)"""
+        self._all_executed_queries = []
+        self._last_result = []
+        self._last_executed_sql = ""
+        self._last_csv_path = None
+
     def close(self):
         """리소스 정리"""
         self.validator.close()
@@ -235,6 +245,15 @@ async def execute_sql(args: dict[str, Any]) -> dict[str, Any]:
 
     result = handler.executor.execute(sql, parallel=parallel)
 
+    # 모든 실행 쿼리를 히스토리에 추가 (디버그용)
+    handler._all_executed_queries.append({
+        "sql": sql,
+        "success": result["success"],
+        "row_count": result.get("row_count", 0),
+        "data": result.get("data", []),
+        "error": result.get("error") if not result["success"] else None,
+    })
+
     # 성공 시 결과 저장
     if result["success"]:
         handler._last_result = result["data"]
@@ -285,6 +304,97 @@ async def export_csv(args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+@tool(
+    "get_optimal_join_path",
+    "여러 테이블을 조인할 최적 경로를 찾습니다. (Graph 모드 전용) 3개 이상의 테이블을 조인해야 할 때 사용하세요. 최단 경로와 조인 조건을 반환합니다.",
+    {"tables": list}
+)
+async def get_optimal_join_path(args: dict[str, Any]) -> dict[str, Any]:
+    """
+    여러 테이블 간 최적 조인 경로 찾기 (Graph 모드 전용)
+
+    NetworkX 그래프 기반으로 Steiner Tree 근사 알고리즘을 사용하여
+    주어진 테이블들을 모두 연결하는 최적 경로를 찾습니다.
+
+    Args:
+        tables: 조인할 테이블 목록 (예: ["tbil_cmpn_l", "tbil_aws_ak_l", "t_aws_mart_shard_l"])
+
+    Returns:
+        최적 조인 경로, 조인 조건, SQL JOIN 절 예시
+    """
+    handler = get_handler()
+
+    # Graph 모드 전용 체크
+    if handler.context_method != "graph":
+        return {
+            "content": [{
+                "type": "text",
+                "text": "오류: get_optimal_join_path는 Graph 모드에서만 사용 가능합니다. YAML 모드에서는 get_join_hint를 테이블 쌍마다 호출하세요."
+            }],
+            "is_error": True
+        }
+
+    tables = args.get("tables")
+
+    if not tables:
+        return {
+            "content": [{"type": "text", "text": "오류: tables 목록이 필요합니다."}],
+            "is_error": True
+        }
+
+    if not isinstance(tables, list) or len(tables) < 2:
+        return {
+            "content": [{"type": "text", "text": "오류: tables는 2개 이상의 테이블명 리스트여야 합니다."}],
+            "is_error": True
+        }
+
+    # SchemaGraph의 get_multi_hop_path 호출
+    path_info = handler.context.get_multi_hop_path(tables)
+
+    if path_info is None:
+        # 어떤 테이블이 없는지 확인
+        missing = [t for t in tables if t not in handler.context.graph]
+        if missing:
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": f"오류: 다음 테이블을 찾을 수 없습니다: {missing}"
+                }],
+                "is_error": True
+            }
+        return {
+            "content": [{
+                "type": "text",
+                "text": f"오류: {tables} 사이에 연결 경로가 없습니다. 관계가 정의되지 않았거나 연결되지 않은 테이블이 있습니다."
+            }],
+            "is_error": True
+        }
+
+    # SQL JOIN 절 예시 생성
+    join_clauses = []
+    base_table = path_info["path"][0]
+
+    for join in path_info["joins"]:
+        # from: table1.col → to: table2.col 형태의 condition
+        condition = join["condition"]
+        join_clauses.append(f"JOIN {join['to']} ON {condition}")
+
+    join_sql_example = f"FROM {base_table}\n" + "\n".join(join_clauses)
+
+    result = {
+        "requested_tables": tables,
+        "optimal_path": path_info["path"],
+        "total_hops": path_info["total_hops"],
+        "joins": path_info["joins"],
+        "join_sql_example": join_sql_example,
+        "note": "실제 쿼리 시 필요한 WHERE 조건(site_id, ym 등)을 추가하세요."
+    }
+
+    return {
+        "content": [{"type": "text", "text": str(result)}]
+    }
+
+
 # =============================================================================
 # MCP 서버 생성 함수
 # =============================================================================
@@ -299,6 +409,7 @@ def create_text_to_sql_mcp_server():
             get_schema_info,
             search_schema,
             get_join_hint,
+            get_optimal_join_path,  # Graph 모드 전용
             validate_sql,
             execute_sql,
             export_csv,
@@ -312,6 +423,7 @@ MCP_TOOL_NAMES = [
     "mcp__text_to_sql__get_schema_info",
     "mcp__text_to_sql__search_schema",
     "mcp__text_to_sql__get_join_hint",
+    "mcp__text_to_sql__get_optimal_join_path",  # Graph 모드 전용
     "mcp__text_to_sql__validate_sql",
     "mcp__text_to_sql__execute_sql",
     "mcp__text_to_sql__export_csv",
